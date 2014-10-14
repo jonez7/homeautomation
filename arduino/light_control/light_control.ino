@@ -1,16 +1,16 @@
 #include <stdint.h>
 
-#define MOTION_DETECTOR_PIN_STAIRS_DOWN     (11)
-#define MOTION_DETECTOR_PIN_STAIRS_UP       (12)
-#define MOTION_DETECTOR_PIN_STORAGE_ROOM    (10)
+#define MOTION_DETECTOR_PIN_STAIRS_DOWN     (7)
+#define MOTION_DETECTOR_PIN_STAIRS_UP       (6)
+#define MOTION_DETECTOR_PIN_STORAGE_ROOM    (5)
 #define INTERNAL_LED_PIN                    (13)
-#define OUTPUT_PIN_STAIRS                   (3)
-#define OUTPUT_PIN_STORAGE                  (9)
+#define OUTPUT_PIN_STAIRS                   (11)
+#define OUTPUT_PIN_STORAGE                  (10)
 #define CHECK_DELAY                         (250)
-#define TIMEOUT_STAIRS                      (30) /*seconds*/
+#define TIMEOUT_STAIRS                      (60) /*seconds*/
 #define TIMEOUT_STORAGE                     (60) /*seconds*/
 #define MAX_INPUT_PINS_PER_LIGHT            (2)
-#define DELAY_TICKS(a)                      ((a) * 1000/CHECK_DELAY)
+#define DELAY_TICKS(a)                      ((a) * (1000/CHECK_DELAY))
 
 static uint8_t g_internalLedState = 0;
 
@@ -18,8 +18,8 @@ typedef struct Light_s {
     uint8_t    outPin;
     uint8_t    setPin[MAX_INPUT_PINS_PER_LIGHT];
     int16_t    brightness;
-    uint16_t   timeout;
-    uint16_t   timeOutSet;
+    uint32_t   timeout;
+    uint32_t   timeOutSet;
     uint8_t    onSpeed;
     uint8_t    offSpeed;
     char     * name;
@@ -31,10 +31,10 @@ Light_s g_LightStairs =  {OUTPUT_PIN_STAIRS,
                           0, 
                           DELAY_TICKS(TIMEOUT_STAIRS), 
                           20, 
-                          50, 
+                          30, 
                           "stairs"};
 Light_s g_LightStorage = {OUTPUT_PIN_STORAGE, 
-                          {MOTION_DETECTOR_PIN_STORAGE_ROOM, 0} , 
+                          {MOTION_DETECTOR_PIN_STORAGE_ROOM, 0}, 
                           0, 
                           0,
                           DELAY_TICKS(TIMEOUT_STORAGE), 
@@ -71,17 +71,32 @@ void LightOn(uint8_t const lightIndex) {
             ToggleLed();
         }
         light->timeout = light->timeOutSet;
-        Serial.print(light->timeout);
+        Serial.println(light->timeout);
     }
 }
 
 void LightOffTimer(uint8_t const lightIndex) {
+    uint8_t j;
     Light_s * const light = lights[lightIndex];
     if(light->timeout>0) {
         light->timeout--;
     }
     if(light->timeout == 0) {
+        Serial.print(light->name);
+        Serial.println(" OFF ");
         for (light->brightness; light->brightness > 0; light->brightness--) {
+            uint8_t pinStatus = 0;
+            for(j=0; j<MAX_INPUT_PINS_PER_LIGHT; j++) {
+                if (light->setPin[j] != 0) {
+                    pinStatus |= digitalRead(light->setPin[j]);
+                }
+                if (pinStatus) {
+                    light->brightness = 255;
+                    analogWrite(light->outPin, light->brightness);
+                    light->timeout = light->timeOutSet;
+                    return;
+                }
+            }
             analogWrite(light->outPin, light->brightness);
             delay(light->offSpeed);
             ToggleLed();
@@ -107,6 +122,7 @@ void CheckInputs(void) {
                 LightOffTimer(i);
             }
         }
+
     }
 }
 
