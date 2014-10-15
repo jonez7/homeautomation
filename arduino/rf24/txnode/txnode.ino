@@ -4,11 +4,25 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <LowPower.h>
+#include <DHT.h>
 
-#define TX_PERIOD    10
+#define TX_PERIOD    1
 #define ONE_WIRE_BUS 2
+#define DHT_PIN      3 
 #define CE_PIN       9
 #define CSN_PIN      10
+#define DHTTYPE      DHT22   // DHT 22  (AM2302)
+
+#define USE_DHT
+
+// Example testing sketch for various DHT humidity/temperature sensors
+// Written by ladyada, public domain
+
+
+
+#ifdef USE_DHT
+DHT dht(DHT_PIN, DHTTYPE);
+#endif
 
 // nRF24L01(+) radio attached to SPI and pins 9 & 10
 RF24 radio(CE_PIN, CSN_PIN); // Create a Radio
@@ -47,7 +61,8 @@ typedef struct message_s {
     uint8_t     myId;
     uint8_t     seq;
     uint8_t     spare;
-    float       value;
+    float       value1;
+    float       value2;
 }message_s;
 
 message_s  message;
@@ -55,7 +70,9 @@ message_s  message;
 
 void setup(void) {
   serial_begin(57600);
-
+#ifdef USE_DHT
+  dht.begin();
+#endif
   sensors.begin();
   if (!sensors.getAddress(insideThermometer, 0)) {
       g_temperature = -1000;  /*Report error this way */
@@ -79,8 +96,13 @@ void loop()
       network.update();
 
       sensors.requestTemperatures(); // Send the command to get temperatures
-
-      message.value = sensors.getTempC(insideThermometer);
+#ifdef USE_DHT
+      message.value1 = dht.readTemperature();
+      message.value2 = dht.readHumidity();
+#else
+      message.value1 = sensors.getTempC(insideThermometer);
+      message.value2 = 0;
+#endif
       message.seq++;
       message.myId = this_node;
       message.type = 1;
@@ -92,7 +114,7 @@ void loop()
       g_wakeupcnt = 0;
 //      toggleLED();
   } 
-  LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
+  LowPower.powerDown(SLEEP_1S, ADC_OFF, BOD_OFF);
 }//--(end main loop )---
 
 

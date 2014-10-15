@@ -41,7 +41,8 @@ typedef struct message_s {
     uint8_t     myId;
     uint8_t     seq;
     uint8_t     spare;
-    float       value;
+    float       value1;
+    float       value2;
 }message_s;
 
 message_s  message;
@@ -65,7 +66,9 @@ void loop(void)
     Serial.print(message.myId);
     Serial.print(", seq: ");
     Serial.print(message.seq);
-    Serial.print(", value: ");
-    Serial.println(message.value);
+    Serial.print(", value1: ");
+    Serial.print(message.value1);
+    Serial.print(", value2: ");
+    Serial.println(message.value2);
   }
 }
