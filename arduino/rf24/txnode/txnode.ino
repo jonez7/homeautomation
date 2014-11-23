@@ -69,7 +69,7 @@ message_s  message;
 
 
 void setup(void) {
-  serial_begin(57600);
+  serial_begin(9600);
 #ifdef USE_DHT
   dht.begin();
 #endif

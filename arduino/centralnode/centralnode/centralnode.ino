@@ -1,34 +1,70 @@
-#include <UIPEthernet.h> // Used for Ethernet
+#include <SPI.h>         
+#include <Ethernet.h>
+#include <EthernetUdp.h>
 #include <DHT22.h>
 #include <stdint.h>
 #include <OneWire.h>
 #include <JsonGenerator.h>
+#include <JsonParser.h>
 #include <DallasTemperature.h>
+#include <RF24Network.h>
+#include <RF24.h>
+#include <EEPROM.h>
 
+#define DEFAULT_REPORT_INTERVAL       10000
+#define DEFAULT_POWER_SEND_INTERVAL   2000
+#define DEFAULT_MY_PORT               55555
+#define DEFAULT_SERVER_PORT           55555
 #define DHT22_PIN                 31
-#define REPORT_INTERVAL           10000
+
 #define NUM_OF_DS18B20_SENSORS    10
 #define NUM_OF_DHT22_SENSORS      1
 #define DIGITAL_INPUT_SENSOR      3  // The digital input you attached your light sensor.  (Only 2 and 3 generates interrupt!)
 #define PULSE_FACTOR              10000      // Nummber of blinks per KWH
 #define MAX_WATT                  30000
 #define INTERRUPT                 DIGITAL_INPUT_SENSOR-2 // Usually the interrupt = pin -2 (on uno/nano anyway)
-
-#define POWER_SEND_FREQUENCY      2000; // Minimum time between send (in milliseconds)
-
+//#define UDP_TX_PACKET_MAX_SIZE    128
 #define NUM_OF_STATUS_STRINGS     8 /*For DHT22*/
+#define CE_PIN                    40
+#define CSN_PIN                   41
 
-
-using namespace ArduinoJson::Generator;
-
-IPAddress const serverIp   = IPAddress(192,168,1,21);
-IPAddress const myIp       = IPAddress(192,168,1,99);
-uint16_t  const serverPort = 55555;
-
-
-// Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS              32
 #define TEMPERATURE_PRECISION     11
+
+typedef struct Config_s {
+    IPAddress    serverIp;
+    IPAddress    localIp;
+    uint16_t     serverPort;
+    uint16_t     localPort;
+    uint16_t     reportInterval;
+    uint16_t     powerReportInterval;
+    uint8_t      radioCePin;
+    uint8_t      radioCsnPin;
+    uint8_t      dht22Pin;
+    uint8_t      oneWireBus;
+}Config_s;
+
+Config_s         configuration;
+
+using namespace ArduinoJson;
+/*
+IPAddress const serverIp   = IPAddress(192,168,0,244);
+IPAddress const myIp       = IPAddress(192,168,0,99);
+uint16_t  const serverPort = 55555;
+uint16_t  const localPort  = 55555;
+*/
+RF24 radio(CE_PIN, CSN_PIN); // Create a Radio
+
+// Network uses that radio
+RF24Network network(radio);
+
+// Address of our node
+const uint16_t this_node = 0;
+
+// Address of the other node
+const uint16_t other_node = 1;
+
+
 
 double ppwh = ((double)PULSE_FACTOR)/1000;
 
@@ -41,8 +77,6 @@ double oldKwh;
 unsigned long lastSend;
 unsigned long tempLastSend;
 uint16_t localUdpPort             = 7000;
-
-#define USE_UDP
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -86,12 +120,12 @@ sensors_s tempsensors[NUM_OF_DS18B20_SENSORS] = {
 DHT22 myDHT22(DHT22_PIN);
 
 // **** ETHERNET SETTING ****
-// Arduino Uno pins: 10 = CS, 11 = MOSI, 12 = MISO, 13 = SCK
-// Ethernet MAC address - must be unique on your network - MAC Reads T4A001 in hex (unique in your network)
 byte mac[] = { 0x54, 0x34, 0x41, 0x30, 0x30, 0x32 };                                      
-// For the rest we use DHCP (IP address and such)
 
 EthernetUDP udp;
+
+char rxPacketBuffer[UDP_TX_PACKET_MAX_SIZE];
+
 
 char const * const statusStrings[NUM_OF_STATUS_STRINGS] = {
     "ok",
@@ -138,11 +172,65 @@ void InitDsSensors(void) {
     }
 }
 
+
+void WritePersistent(void) {
+    char tmp[20];
+    uint8_t i;
+    uint8_t j;
+    uint16_t address = 0;
+    uint8_t * srcPtr;
+
+    EEPROM.write(address, 123);
+    address++;
+
+    srcPtr = (uint8_t*)&configuration;
+    for(j=0; j<sizeof(configuration); j++) {
+        EEPROM.write(address, srcPtr[j]);
+        address++;
+    }
+}
+
+void ReadPersistent(void) {
+    char tmp[20];
+    uint8_t i;
+    uint8_t j;
+    uint16_t address = 0;
+    uint8_t * dstPtr;
+    uint8_t eepromWritten = EEPROM.read(address); 
+    address++;
+    
+    if (eepromWritten == 123) {
+        /*Read meas resistor value */
+        dstPtr = (uint8_t*)&configuration;
+        for(j=0; j<sizeof(configuration); j++) {
+            dstPtr[j] = EEPROM.read(address);
+            address++;
+        }
+    } else {
+        /* Use defaults */
+        configuration.serverIp               = IPAddress(192,168,0,244);
+        configuration.serverPort             = DEFAULT_SERVER_PORT;
+        configuration.localIp                = IPAddress(192,168,0,99);
+        configuration.localPort              = DEFAULT_MY_PORT;
+        configuration.reportInterval         = DEFAULT_REPORT_INTERVAL;
+        configuration.powerReportInterval    = DEFAULT_POWER_SEND_INTERVAL;
+        configuration.radioCePin             = CE_PIN;
+        configuration.radioCsnPin            = CSN_PIN;
+        configuration.dht22Pin               = DHT22_PIN;
+        configuration.oneWireBus             = ONE_WIRE_BUS;
+    }
+}
+
 void setup() {
+    ReadPersistent();
 
     Serial.begin(9600);
 
-    Ethernet.begin(mac, myIp);
+    Ethernet.begin(mac, configuration.localIp);
+    udp.begin(configuration.localPort);
+
+    radio.begin();
+    network.begin(/*channel*/ 90, /*node address*/ this_node);
 
     Serial.print("IP Address        : ");
     Serial.println(Ethernet.localIP());
@@ -152,37 +240,18 @@ void setup() {
     Serial.println(Ethernet.gatewayIP());
     Serial.print("DNS Server IP     : ");
     Serial.println(Ethernet.dnsServerIP());
-    InitDsSensors();
+//    InitDsSensors();
     attachInterrupt(INTERRUPT, powerMeasPulse, RISING);
     lastSend     = millis();
     tempLastSend = millis();
 }
 
-void SendToClient(char const * const serial,
-                  char const * const statusStr,
-                  float const temperature,
-                  float const humidity) {
-#ifdef USE_UDP
-#else
-    client.print("ser=");
-    client.print(serial);
-    client.print("&st=");
-    client.print(statusStr);
-    client.print("&temp=");
-    client.print(temperature);
-    client.print("&hum=");
-    client.print(humidity);
-    client.print("&");
-#endif
-}
-
-
 
 long lastReadingTime = 0;
 
-JsonArray<NUM_OF_DS18B20_SENSORS + NUM_OF_DHT22_SENSORS> temperatureReportArray;
-JsonObject<4> reportObjectTempOnly[NUM_OF_DS18B20_SENSORS];
-JsonObject<5> reportObjectTempAndHum[NUM_OF_DHT22_SENSORS];
+Generator::JsonArray<NUM_OF_DS18B20_SENSORS + NUM_OF_DHT22_SENSORS> temperatureReportArray;
+Generator::JsonObject<4> reportObjectTempOnly[NUM_OF_DS18B20_SENSORS];
+Generator::JsonObject<5> reportObjectTempAndHum[NUM_OF_DHT22_SENSORS];
 
 void ReportAllSensors(void) {
     int8_t i;
@@ -216,7 +285,7 @@ void ReportAllSensors(void) {
         temperatureReportArray.add(reportObjectTempAndHum[i]);
     }
 
-    udp.beginPacket(serverIp, serverPort);
+    udp.beginPacket(configuration.serverIp, configuration.serverPort);
     
     temperatureReportArray.printTo(udp);    
     udp.endPacket();
@@ -226,7 +295,7 @@ void ReportAllSensors(void) {
 
 void SendPowerMeas() { 
     unsigned long now = millis();
-    bool sendTime = (now - lastSend) > POWER_SEND_FREQUENCY;
+    bool sendTime = (now - lastSend) > configuration.powerReportInterval;
     if (sendTime) {
         double kwh = ((double)pulseCount/((double)PULSE_FACTOR));     
         oldPulseCount = pulseCount;
@@ -235,9 +304,9 @@ void SendPowerMeas() {
         }
 
         //udp.beginPacket(udp.remoteIP(), 7001);
-        JsonArray<1> array;
+        Generator::JsonArray<1> array;
 
-        JsonObject<5> reportObject;
+        Generator::JsonObject<5> reportObject;
 
         reportObject["sensor"] = "power";
         reportObject["id"]     = "main";
@@ -248,7 +317,7 @@ void SendPowerMeas() {
 
         Serial.println(array);
 
-        udp.beginPacket(serverIp, serverPort);
+        udp.beginPacket(configuration.serverIp, configuration.serverPort);
         
         array.printTo(udp);    
         udp.endPacket();
@@ -295,11 +364,89 @@ void ReadTempMeas() {
     }
 }
 
+void checkUdpPackets() {
+    // if there's data available, read a packet
+    int16_t packetSize = udp.parsePacket();
+
+    if(packetSize) {
+        Serial.print("Received packet of size ");
+        Serial.println(packetSize);
+        Serial.print("From ");
+        IPAddress remote = udp.remoteIP();
+        for (int i =0; i < 4; i++) {
+            Serial.print(remote[i], DEC);
+        if (i < 3) {
+        Serial.print(".");
+        }
+    }
+    Serial.print(", port ");
+    Serial.println(udp.remotePort());
+    
+    // read the packet into packetBufffer
+    udp.read(rxPacketBuffer,UDP_TX_PACKET_MAX_SIZE);
+
+    Parser::JsonParser<32> parser;
+    
+    Parser::JsonObject root = parser.parse(rxPacketBuffer);
+
+    udp.beginPacket(udp.remoteIP(), udp.remotePort());
+
+    Serial.println("Contents:");
+    Serial.println(rxPacketBuffer);
+
+    if (root.success()) {
+        long value = root["PwrInterval"];
+        configuration.powerReportInterval = value;
+        udp.write("PowerReportInterval set to ");
+        udp.write(configuration.powerReportInterval);
+        WritePersistent();
+    } else {
+        udp.write("Parsing failed");
+        Serial.println("parsing failed");
+    }
+    udp.endPacket();
+    }
+}
+
+
+typedef struct message_s {
+    uint8_t     type;
+    uint8_t     myId;
+    uint8_t     seq;
+    uint8_t     spare;
+    float       value1;
+    float       value2;
+}message_s;
+
+message_s  message;
+
+void ReceiveRF24(void)
+{
+    // Pump the network regularly
+    network.update();
+    // Is there anything ready for us?
+    while ( network.available() )
+    {
+        // If so, grab it and print it out
+        RF24NetworkHeader header;
+        network.read(header,&message,sizeof(message));
+        Serial.print("type: ");
+        Serial.print(message.type);
+        Serial.print(", Id: ");
+        Serial.print(message.myId);
+        Serial.print(", seq: ");
+        Serial.print(message.seq);
+        Serial.print(", value1: ");
+        Serial.print(message.value1);
+        Serial.print(", value2: ");
+        Serial.println(message.value2);
+    }
+}
 
 
 void loop() {
     unsigned long now = millis();
-    bool sendTime = (now - tempLastSend) > REPORT_INTERVAL;
+    bool sendTime = (now - tempLastSend) > configuration.reportInterval;
     
     SendPowerMeas();
     
@@ -308,4 +455,8 @@ void loop() {
         ReportAllSensors();
         tempLastSend  = now;
     }
+    ReceiveRF24();
+    checkUdpPackets();
 }
+
+
